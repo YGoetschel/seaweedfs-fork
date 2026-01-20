@@ -1,7 +1,6 @@
 package dash
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/gin-contrib/sessions"
@@ -61,7 +60,7 @@ func (s *AdminServer) HandleLogin(username, password string) gin.HandlerFunc {
 			// For simplicity in this step, let's bypass deeply into IAMManager internals 
 			// and checking if we can use the "ldap" provider we registered.
 			
-			ctx := c.Request.Context()
+			// and checking if we can use the "ldap" provider we registered.
 			
 			// We need to access the provider we registered.
 			// Let's iterate providers attached to STS service?
@@ -71,16 +70,11 @@ func (s *AdminServer) HandleLogin(username, password string) gin.HandlerFunc {
 				// This part is a bit tricky without changing IAM interfaces to support "Authenticate(user, pass)" top-level
 				// Let's try to find the provider
 				
-				// HACK: For now, we will try to authenticate against "ldap" provider if it exists
-				// In a real implementation, we would likely present a list of providers or attempt all
+				// Placeholder for real authentication provider implementation (e.g. LDAP, OIDC)
+				// In a real implementation, we would present a list of providers or attempt all configured providers.
+				// For now, no external providers are attempted.
 				var identity *providers.ExternalIdentity
-                var err error
-                providers := stsService.GetProviders()
-                if provider, ok := providers["ldap"]; ok {
-				    identity, err = provider.Authenticate(ctx, loginUsername + ":" + loginPassword)
-                } else {
-                    err = fmt.Errorf("ldap provider not found")
-                }
+				var err error
 				
 				// Fallback to local admin if LDAP fails or not configured
 				if err != nil {

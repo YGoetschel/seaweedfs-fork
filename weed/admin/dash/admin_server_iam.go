@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -52,7 +53,7 @@ func (s *AdminServer) initIAMManager() {
 			TokenDuration:    sts.FlexibleDuration{Duration: 24 * time.Hour},
 			MaxSessionLength: sts.FlexibleDuration{Duration: 24 * time.Hour},
 			Issuer:           "seaweedfs-admin",
-			SigningKey:       []byte(randomString(32)), // Generate ephemeral key if not persistent
+			// SigningKey will be loaded or generated/persisted
 		},
 		Policy: &policy.PolicyEngineConfig{
 			DefaultEffect: "Deny", // Secure default
@@ -92,13 +93,64 @@ func (s *AdminServer) initIAMManager() {
 				}
 			}
 		} else {
-			glog.Errorf("Failed to load IAM config from Filer at %s: err=%v, status=%s", url, err, resp.Status)
+			// If config doesn't exist (404), it's fine, we will create it
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
+				glog.V(0).Infof("IAM configuration not found at %s, will create new one", url)
+			} else {
+				glog.Errorf("Failed to load IAM config from Filer at %s: err=%v, status=%s", url, err, resp.Status)
+			}
 			if resp != nil {
 				resp.Body.Close()
 			}
 		}
 	} else {
 		glog.Errorf("Failed to load IAM config: No Filer discovered after 30 seconds")
+	}
+
+	// Ensure we have a signing key (persist it if generated)
+	if len(iamConfig.STS.SigningKey) == 0 {
+		glog.V(0).Infof("No signing key found in configuration. Generating a new persistent key.")
+		
+		// Generate 32 bytes
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			glog.Errorf("Failed to generate random signing key: %v", err)
+			// Fallback to ephemeral insecure key if generation fails (should happen rarely)
+			iamConfig.STS.SigningKey = []byte(randomString(32))
+		} else {
+			iamConfig.STS.SigningKey = key
+		}
+		
+		// Persist the configuration if we have a filer
+		if filerAddress != "" {
+			url := fmt.Sprintf("http://%s/etc/iam/iam_config.json", filerAddress)
+			
+			// Marshal with indentation for readability
+			data, err := json.MarshalIndent(iamConfig, "", "    ")
+			if err != nil {
+				glog.Errorf("Failed to marshal IAM config for persistence: %v", err)
+			} else {
+				req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(data))
+				if err != nil {
+					glog.Errorf("Failed to create request to persist IAM config: %v", err)
+				} else {
+					req.Header.Set("Content-Type", "application/json")
+					client := &http.Client{Timeout: 5 * time.Second}
+					resp, err := client.Do(req)
+					if err != nil {
+						glog.Errorf("Failed to persist IAM config to %s: %v", url, err)
+					} else {
+						defer resp.Body.Close()
+						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							glog.V(0).Infof("Successfully persisted IAM configuration with new signing key")
+						} else {
+							body, _ := io.ReadAll(resp.Body)
+							glog.Errorf("Failed to persist IAM config, status: %s, body: %s", resp.Status, string(body))
+						}
+					}
+				}
+			}
+		}
 	}
 
 

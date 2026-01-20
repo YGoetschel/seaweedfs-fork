@@ -28,6 +28,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 
 	"github.com/seaweedfs/seaweedfs/weed/s3api"
+	"github.com/seaweedfs/seaweedfs/weed/s3api/s3_objectlock"
 	"github.com/seaweedfs/seaweedfs/weed/worker/tasks"
 )
 
@@ -564,9 +565,17 @@ func (s *AdminServer) CreateS3Bucket(bucketName string) error {
 }
 
 // DeleteS3Bucket deletes an S3 bucket and all its contents
+// DeleteS3Bucket deletes an S3 bucket and all its contents
 func (s *AdminServer) DeleteS3Bucket(bucketName string) error {
 	return s.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 		bucketsPath := s.getBucketsPath()
+
+		// Check for Object Lock and locked objects before deletion
+		// This prevents deleting buckets with immutable data
+		if err := s3_objectlock.CheckBucketForLockedObjects(context.Background(), client, bucketsPath, bucketName); err != nil {
+			return fmt.Errorf("object lock check failed: %w", err)
+		}
+
 		// Delete bucket directory recursively
 		_, err := client.DeleteEntry(context.Background(), &filer_pb.DeleteEntryRequest{
 			Directory:            bucketsPath,
