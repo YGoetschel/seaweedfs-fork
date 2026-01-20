@@ -727,8 +727,8 @@ func loadIAMManagerFromConfig(configPath string, filerAddressProvider func() str
 	}
 
 	// Create IAM configuration
+	// Note: STS field removed during Phase 2 decoupling - STS is now injected via SetSTSAdapter()
 	iamConfig := &integration.IAMConfig{
-		STS:    configRoot.STS,
 		Policy: configRoot.Policy,
 		Roles:  roleStoreConfig,
 		Groups: groupStoreConfig,

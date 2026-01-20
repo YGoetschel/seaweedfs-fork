@@ -29,7 +29,12 @@ type S3IAMIntegration struct {
 func NewS3IAMIntegration(iamManager *integration.IAMManager, filerAddress string) *S3IAMIntegration {
 	var stsService *sts.STSService
 	if iamManager != nil {
-		stsService = iamManager.GetSTSService()
+		// GetSTSService returns interface{}, need type assertion
+		if svc := iamManager.GetSTSService(); svc != nil {
+			if typedSvc, ok := svc.(*sts.STSService); ok {
+				stsService = typedSvc
+			}
+		}
 	}
 
 	return &S3IAMIntegration{

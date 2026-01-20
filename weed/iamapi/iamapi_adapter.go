@@ -22,9 +22,7 @@ func (iama *IamApiServer) HandleIAMAction(w http.ResponseWriter, r *http.Request
 	iama.DoActions(w, r)
 }
 
-// SetIAM allows injecting an existing IdentityAccessManagement instance
-// This is critical for integrating with S3ApiServer to share the same IAM state
-// ensuring that operations performed via IamApiServer adapter affect the S3 server's IAM state.
+// SetIAM is no-op for the standalone IAM server (doesn't need S3 integration)
 func (iama *IamApiServer) SetIAM(iam *s3api.IdentityAccessManagement) {
-	iama.iam = iam
+	// Standalone IAM server doesn't need S3 integration
 }

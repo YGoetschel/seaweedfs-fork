@@ -28,7 +28,6 @@ func writeIamErrorResponse(w http.ResponseWriter, r *http.Request, iamError *Iam
 	errMsg := iamError.Error.Error()
 	glog.Errorf("Response %+v", errMsg)
 
-	errorResp := newErrorResponse(errCode, errMsg)
 	internalErrorResponse := newErrorResponse(iam.ErrCodeServiceFailureException, "Internal server error")
 
 	switch errCode {

@@ -10,7 +10,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/glog"
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 	"github.com/seaweedfs/seaweedfs/weed/iam/providers"
-	// "github.com/seaweedfs/seaweedfs/weed/iam/sts" // Removed for decoupling
+	"github.com/seaweedfs/seaweedfs/weed/iam/sts"  // Needed for STSConfig type
 	"github.com/seaweedfs/seaweedfs/weed/iam/utils"
 	"github.com/seaweedfs/seaweedfs/weed/stats"
 	"github.com/seaweedfs/seaweedfs/weed/wdclient"
@@ -29,9 +29,9 @@ type IAMManager struct {
 
 // IAMConfig holds configuration for all IAM components
 type IAMConfig struct {
-	// STS service configuration - REMOVED for PR2 decoupling
-	// STS will be configured separately in PR3 via SetSTSAdapter()
-	// STS *sts.STSConfig `json:"sts"`
+	// STS service configuration - kept for backward compatibility with admin
+	// In PR2: STSAdapter pattern allows decoupling, but config field remains for initialization
+	STS *sts.STSConfig `json:"sts"`
 
 	// Policy engine configuration
 	Policy *policy.PolicyEngineConfig `json:"policy"`

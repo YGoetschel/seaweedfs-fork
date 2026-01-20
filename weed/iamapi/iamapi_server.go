@@ -14,12 +14,15 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/credential"
 	"github.com/seaweedfs/seaweedfs/weed/filer"
 	"github.com/seaweedfs/seaweedfs/weed/glog"
+	"github.com/seaweedfs/seaweedfs/weed/iam/integration"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/iam_pb"
-	"github.com/seaweedfs/seaweedfs/weed/iam/constants"
-	"github.com/seaweedfs/seaweedfs/weed/iam/errors"
-	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/s3api"
+	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	. "github.com/seaweedfs/seaweedfs/weed/s3api/s3_constants"
+	"github.com/seaweedfs/seaweedfs/weed/s3api/s3err"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 	"github.com/seaweedfs/seaweedfs/weed/wdclient"
 	"google.golang.org/grpc"
@@ -56,7 +59,7 @@ type IamServerOption struct {
 
 type IamApiServer struct {
 	s3ApiConfig      IamS3ApiConfig
-	s3Identity       S3IdentityManager
+	iam              *s3api.IdentityAccessManagement
 	shutdownContext  context.Context
 	shutdownCancel   context.CancelFunc
 	masterClient     *wdclient.MasterClient
@@ -92,16 +95,54 @@ func NewIamApiServerWithStore(router *mux.Router, option *IamServerOption, expli
 
 	s3ApiConfigure = configure
 
-	// Initialize credential manager directly
-	// S3 integration will be added in PR4
-	configure.credentialManager = credential.NewCredentialManager(explicitStore, option.Filers, option.GrpcDialOption)
+	s3Option := s3api.S3ApiServerOption{
+		Filers:         option.Filers,
+		GrpcDialOption: option.GrpcDialOption,
+	}
 
-	// Use stub S3 identity manager for PR2
-	s3Identity := NewStubS3IdentityManager()
+	iam := s3api.NewIdentityAccessManagementWithStore(&s3Option, explicitStore)
+	configure.credentialManager = iam.GetCredentialManager()
+
+	// Initialize IAM manager and integration for CreateRole and other advanced features
+	// This allows getIamManager() to return a valid manager instead of nil
+	iamManager := integration.NewIAMManager()
+	
+	// Create minimal IAM config for standalone mode
+	iamConfig := &integration.IAMConfig{
+		Policy: &policy.PolicyEngineConfig{
+			DefaultEffect: "Deny",
+		},
+		Roles: &integration.RoleStoreConfig{
+			StoreType: "cached-filer",
+		},
+		Groups: &integration.GroupStoreConfig{
+			StoreType: "cached-filer",
+		},
+	}
+	
+	// Initialize with filer address provider
+	filerAddressProvider := func() string {
+		if len(option.Filers) > 0 {
+			return string(option.Filers[0])
+		}
+		return ""
+	}
+	
+	if err = iamManager.Initialize(iamConfig, filerAddressProvider, masterClient); err != nil {
+		glog.Warningf("Failed to initialize IAM manager: %v (some features may be limited)", err)
+	} else {
+		// Create S3 IAM integration
+		s3iam := s3api.NewS3IAMIntegration(iamManager, filerAddressProvider())
+		
+		// Set the integration in IdentityAccessManagement so getIamManager() works
+		iam.SetIAMIntegration(s3iam)
+		
+		glog.V(1).Infof("IAM integration initialized successfully for IAM API server")
+	}
 
 	iamApiServer = &IamApiServer{
 		s3ApiConfig:     s3ApiConfigure,
-		s3Identity:      s3Identity,
+		iam:             iam,
 		shutdownContext: shutdownCtx,
 		shutdownCancel:  shutdownCancel,
 		masterClient:    masterClient,
@@ -118,10 +159,10 @@ func (iama *IamApiServer) registerRouter(router *mux.Router) {
 	// ListBuckets
 
 	// apiRouter.Methods("GET").Path("/").HandlerFunc(track(s3a.iam.Auth(s3a.ListBucketsHandler, ACTION_ADMIN), "LIST"))
-	apiRouter.Methods(http.MethodPost).Path("/").HandlerFunc(iama.DoActions)
+	apiRouter.Methods(http.MethodPost).Path("/").HandlerFunc(iama.iam.Auth(iama.DoActions, ACTION_ADMIN))
 	//
 	// NotFound
-	apiRouter.NotFoundHandler = http.HandlerFunc(errors.NotFoundHandler)
+	apiRouter.NotFoundHandler = http.HandlerFunc(s3err.NotFoundHandler)
 }
 
 // Shutdown gracefully stops the IAM API server and releases resources.

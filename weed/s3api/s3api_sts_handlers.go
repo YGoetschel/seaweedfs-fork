@@ -142,31 +142,39 @@ func (s3a *S3ApiServer) handleAssumeRole(w http.ResponseWriter, r *http.Request)
 		req.DurationSeconds = &dur
 	}
 
-	// Call Backend
+	// Call Backend - use refactored AssumeRole signature
 	if s3a.iamIntegration.iamManager == nil {
 		writeSTSError(w, r, "Server", "ServiceUnavailable", "IAM manager not initialized")
 		return
 	}
 
-	resp, err := s3a.iamIntegration.iamManager.AssumeRole(r.Context(), req)
+	// Extract external identity from authenticated request
+	externalIdentity := &providers.ExternalIdentity{
+		Provider: "seaweedfs", // Internal provider for local users
+		UserID:   identity.Name,
+	}
+
+	// Call refactored AssumeRole with new signature: (ctx, roleArn, identity, durationSeconds)
+	resp, err := s3a.iamIntegration.iamManager.AssumeRole(r.Context(), roleArn, externalIdentity, req.DurationSeconds)
 	if err != nil {
 		glog.Errorf("AssumeRole failed: %v", err)
 		writeSTSError(w, r, "Sender", "AccessDenied", err.Error())
 		return
 	}
 
-	// Marshaling Response
+	// Marshaling Response - use refactored response structure
+	// AssumeRoleResponse now has: AccessKeyID, SecretAccessKey, SessionToken, Expiration, AssumedRoleARN
 	xmlResp := AssumeRoleResponse{
 		Result: AssumeRoleResult{
 			Credentials: STSCredentials{
-				AccessKeyId:     resp.Credentials.AccessKeyId,
-				SecretAccessKey: resp.Credentials.SecretAccessKey,
-				SessionToken:    resp.Credentials.SessionToken,
-				Expiration:      resp.Credentials.Expiration.Format(time.RFC3339),
+				AccessKeyId:     resp.AccessKeyID,
+				SecretAccessKey: resp.SecretAccessKey,
+				SessionToken:    resp.SessionToken,
+				Expiration:      resp.Expiration.Format(time.RFC3339),
 			},
 			AssumedRoleUser: &AssumedRoleUser{
-				Arn:           resp.AssumedRoleUser.Arn,
-				AssumedRoleId: resp.AssumedRoleUser.AssumedRoleId,
+				Arn:           resp.AssumedRoleARN,
+				AssumedRoleId: roleSessionName, // Use session name as role ID
 			},
 		},
 	}
