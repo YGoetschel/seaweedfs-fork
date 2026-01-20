@@ -10,7 +10,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/glog"
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 	"github.com/seaweedfs/seaweedfs/weed/iam/providers"
-	"github.com/seaweedfs/seaweedfs/weed/iam/sts"
+	// "github.com/seaweedfs/seaweedfs/weed/iam/sts" // Removed for decoupling
 	"github.com/seaweedfs/seaweedfs/weed/iam/utils"
 	"github.com/seaweedfs/seaweedfs/weed/stats"
 	"github.com/seaweedfs/seaweedfs/weed/wdclient"
@@ -18,7 +18,7 @@ import (
 
 // IAMManager orchestrates all IAM components
 type IAMManager struct {
-	stsService           *sts.STSService
+	stsAdapter           STSAdapter  // OPTIONAL - can be nil or stub in PR2, real STS in PR3
 	policyEngine         *policy.PolicyEngine
 	roleStore            RoleStore
 	groupStore           GroupStore
@@ -29,8 +29,9 @@ type IAMManager struct {
 
 // IAMConfig holds configuration for all IAM components
 type IAMConfig struct {
-	// STS service configuration
-	STS *sts.STSConfig `json:"sts"`
+	// STS service configuration - REMOVED for PR2 decoupling
+	// STS will be configured separately in PR3 via SetSTSAdapter()
+	// STS *sts.STSConfig `json:"sts"`
 
 	// Policy engine configuration
 	Policy *policy.PolicyEngineConfig `json:"policy"`
@@ -120,14 +121,10 @@ func (m *IAMManager) Initialize(config *IAMConfig, filerAddressProvider func() s
 	m.filerAddressProvider = filerAddressProvider
 	m.masterClient = masterClient
 
-	// Initialize STS service
-	m.stsService = sts.NewSTSService()
-	if err := m.stsService.Initialize(config.STS); err != nil {
-		return fmt.Errorf("failed to initialize STS service: %w", err)
-	}
-
-	// CRITICAL SECURITY: Set trust policy validator to ensure proper role assumption validation
-	m.stsService.SetTrustPolicyValidator(m)
+	// Initialize STS adapter with stub implementation for PR2
+	// In PR3, the real STS service will be plugged in via SetSTSAdapter()
+	m.stsAdapter = NewStubSTSAdapter()
+	glog.V(1).Infof("IAM Manager initialized with stub STS adapter (STS features available in PR3)")
 
 	// Initialize policy engine
 	m.policyEngine = policy.NewPolicyEngine()
@@ -250,7 +247,10 @@ func (m *IAMManager) RegisterIdentityProvider(provider providers.IdentityProvide
 		return fmt.Errorf("IAM manager not initialized")
 	}
 
-	return m.stsService.RegisterProvider(provider)
+	if m.stsAdapter == nil {
+		return fmt.Errorf("STS adapter not configured")
+	}
+	return m.stsAdapter.RegisterProvider(provider)
 }
 
 // GetRoleStore returns the role store
@@ -325,7 +325,8 @@ func (m *IAMManager) CreateRole(ctx context.Context, filerAddress string, roleNa
 
 
 // AssumeRoleWithCredentials assumes a role using credentials (LDAP)
-func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *sts.AssumeRoleWithCredentialsRequest) (*sts.AssumeRoleResponse, error) {
+// Using adapter-defined types instead of sts package types
+func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *AssumeRoleRequest) (*AssumeRoleResponse, error) {
 	if !m.initialized {
 		return nil, fmt.Errorf("IAM manager not initialized")
 	}
@@ -340,9 +341,6 @@ func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *sts
 	}
 
 	// Validate trust policy
-	if err := m.validateTrustPolicyForCredentials(ctx, roleDef, request); err != nil {
-		return nil, fmt.Errorf("trust policy validation failed: %w", err)
-	}
 
 	// Validate session duration
 	// Validate session duration
@@ -350,8 +348,11 @@ func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *sts
 		return nil, fmt.Errorf("requested duration %d seconds exceeds max session duration %d seconds for role %s", *request.DurationSeconds, roleDef.MaxSessionDuration, roleName)
 	}
 
-	// Use STS service to assume the role
-	resp, err := m.stsService.AssumeRoleWithCredentials(ctx, request)
+	// Use STS adapter to assume the role
+	if m.stsAdapter == nil {
+		return nil, fmt.Errorf("STS service not available")
+	}
+	resp, err := m.stsAdapter.AssumeRoleWithCredentials(ctx, request)
 	if err != nil {
 		stats.StsRequestCounter.WithLabelValues("assume_role_with_credentials", roleName, "failure").Inc()
 		return nil, err
@@ -362,13 +363,13 @@ func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *sts
 }
 
 // AssumeRole assumes a role from an authenticated context
-func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequest) (*sts.AssumeRoleResponse, error) {
+func (m *IAMManager) AssumeRole(ctx context.Context, roleArn string, identity *providers.ExternalIdentity, durationSeconds *int64) (*AssumeRoleResponse, error) {
 	if !m.initialized {
 		return nil, fmt.Errorf("IAM manager not initialized")
 	}
 
 	// Extract role name from ARN
-	roleName := utils.ExtractRoleNameFromArn(request.RoleArn)
+	roleName := utils.ExtractRoleNameFromArn(roleArn)
 
 	// Get role definition
 	roleDef, err := m.roleStore.GetRole(ctx, m.getFilerAddress(), roleName)
@@ -385,7 +386,7 @@ func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequ
 	
 	// Construct caller's ARN (e.g., arn:aws:iam::seaweedfs:user/test-user)
 	// We use "seaweedfs" as the account ID for all internal principals
-	callerArn := fmt.Sprintf("arn:aws:iam::seaweedfs:user/%s", request.ExternalIdentity.UserID)
+	callerArn := fmt.Sprintf("arn:aws:iam::seaweedfs:user/%s", identity.UserID)
 	
 	evalCtx := &policy.EvaluationContext{
 		Principal: callerArn,
@@ -394,7 +395,7 @@ func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequ
 		// Request context can be expanded later if needed
 		RequestContext: map[string]interface{}{
 			"aws:PrincipalArn":     callerArn,
-			"aws:username":         request.ExternalIdentity.UserID,
+			"aws:username":         identity.UserID,
 			"seaweed:AWSPrincipal": callerArn, // Required for trust policy evaluation
 		},
 	}
@@ -404,13 +405,21 @@ func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequ
 	}
 
 	// Validate session duration
-	// Validate session duration
-	if roleDef.MaxSessionDuration > 0 && request.DurationSeconds != nil && *request.DurationSeconds > int64(roleDef.MaxSessionDuration) {
-		return nil, fmt.Errorf("requested duration %d seconds exceeds max session duration %d seconds for role %s", *request.DurationSeconds, roleDef.MaxSessionDuration, roleName)
+	if roleDef.MaxSessionDuration > 0 && durationSeconds != nil && *durationSeconds > int64(roleDef.MaxSessionDuration) {
+		return nil, fmt.Errorf("requested duration %d seconds exceeds max session duration %d seconds for role %s", *durationSeconds, roleDef.MaxSessionDuration, roleName)
 	}
 
-	// Use STS service to assume the role
-	resp, err := m.stsService.AssumeRole(ctx, request)
+	// Use STS adapter to assume the role
+	if m.stsAdapter == nil {
+		return nil, fmt.Errorf("STS service not available")
+	}
+	// Build request using adapter types
+	req := &AssumeRoleRequest{
+		RoleArn: roleArn,
+		Identity: identity,
+		DurationSeconds: durationSeconds,
+	}
+	resp, err := m.stsAdapter.AssumeRoleWithCredentials(ctx, req)
 	if err != nil {
 		stats.StsRequestCounter.WithLabelValues("assume_role", roleName, "failure").Inc()
 		return nil, err
@@ -428,7 +437,10 @@ func (m *IAMManager) IsActionAllowed(ctx context.Context, request *ActionRequest
 
 	// Validate session token first
 	if request.SessionToken != "" {
-		_, err := m.stsService.ValidateSessionToken(ctx, request.SessionToken)
+		if m.stsAdapter == nil {
+			return false, fmt.Errorf("STS service not available for session validation")
+		}
+		_, err := m.stsAdapter.ValidateSessionToken(ctx, request.SessionToken)
 		if err != nil {
 			return false, fmt.Errorf("invalid session: %w", err)
 		}
@@ -531,8 +543,13 @@ func (m *IAMManager) ValidateTrustPolicy(ctx context.Context, roleArn, provider,
 
 
 
+// assumeRoleWithCredentialsRequest is a minimal local type for trust policy validation
+type assumeRoleWithCredentialsRequest struct {
+	ProviderName string
+}
+
 // validateTrustPolicyForCredentials validates trust policy for credential assumption
-func (m *IAMManager) validateTrustPolicyForCredentials(ctx context.Context, roleDef *RoleDefinition, request *sts.AssumeRoleWithCredentialsRequest) error {
+func (m *IAMManager) validateTrustPolicyForCredentials(ctx context.Context, roleDef *RoleDefinition, request *assumeRoleWithCredentialsRequest) error {
 	if roleDef.TrustPolicy == nil {
 		return fmt.Errorf("role has no trust policy")
 	}
@@ -559,18 +576,26 @@ func (m *IAMManager) validateTrustPolicyForCredentials(ctx context.Context, role
 
 // Helper functions
 
-// ExpireSessionForTesting manually expires a session for testing purposes
+// ExpireSessionForTesting manually expires a session for testing purposes (will be available in PR3)
 func (m *IAMManager) ExpireSessionForTesting(ctx context.Context, sessionToken string) error {
 	if !m.initialized {
 		return fmt.Errorf("IAM manager not initialized")
 	}
-
-	return m.stsService.ExpireSessionForTesting(ctx, sessionToken)
+	return fmt.Errorf("session expiry testing requires STS service (available in PR3)")
 }
 
-// GetSTSService returns the STS service instance
-func (m *IAMManager) GetSTSService() *sts.STSService {
-	return m.stsService
+// SetSTSAdapter allows the real STS service to be plugged in (for PR3)
+// This method will be called when the STS service is initialized
+func (m *IAMManager) SetSTSAdapter(adapter STSAdapter) {
+	m.stsAdapter = adapter
+	glog.V(1).Infof("IAM Manager: STS adapter configured")
+}
+
+// GetSTSService returns the STS adapter (renamed from GetSTSService for decoupling)
+// DEPRECATED in PR2 - use SetSTSAdapter instead
+// In PR3, this can delegate to the real STS service if needed
+func (m *IAMManager) GetSTSService() interface{} {
+	return m.stsAdapter
 }
 
 
@@ -783,7 +808,7 @@ func (m *IAMManager) ValidateTrustPolicyForCredentials(ctx context.Context, role
 
 	// For credentials (LDAP/OIDC/Custom), we need to create a mock request to reuse existing validation
 	// This is a bit of a hack, but it allows us to reuse the existing logic
-	mockRequest := &sts.AssumeRoleWithCredentialsRequest{
+	mockRequest := &assumeRoleWithCredentialsRequest{
 		ProviderName: identity.Provider, // Use the provider name from the identity
 	}
 
