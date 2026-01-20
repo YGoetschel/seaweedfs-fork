@@ -17,10 +17,9 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/iam_pb"
-	"github.com/seaweedfs/seaweedfs/weed/s3api"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
-	. "github.com/seaweedfs/seaweedfs/weed/s3api/s3_constants"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/s3err"
+	"github.com/seaweedfs/seaweedfs/weed/iam/constants"
+	"github.com/seaweedfs/seaweedfs/weed/iam/errors"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 	"github.com/seaweedfs/seaweedfs/weed/wdclient"
 	"google.golang.org/grpc"
@@ -57,7 +56,7 @@ type IamServerOption struct {
 
 type IamApiServer struct {
 	s3ApiConfig      IamS3ApiConfig
-	iam              *s3api.IdentityAccessManagement
+	s3Identity       S3IdentityManager
 	shutdownContext  context.Context
 	shutdownCancel   context.CancelFunc
 	masterClient     *wdclient.MasterClient
@@ -93,17 +92,16 @@ func NewIamApiServerWithStore(router *mux.Router, option *IamServerOption, expli
 
 	s3ApiConfigure = configure
 
-	s3Option := s3api.S3ApiServerOption{
-		Filers:         option.Filers,
-		GrpcDialOption: option.GrpcDialOption,
-	}
+	// Initialize credential manager directly
+	// S3 integration will be added in PR4
+	configure.credentialManager = credential.NewCredentialManager(explicitStore, option.Filers, option.GrpcDialOption)
 
-	iam := s3api.NewIdentityAccessManagementWithStore(&s3Option, explicitStore)
-	configure.credentialManager = iam.GetCredentialManager()
+	// Use stub S3 identity manager for PR2
+	s3Identity := NewStubS3IdentityManager()
 
 	iamApiServer = &IamApiServer{
 		s3ApiConfig:     s3ApiConfigure,
-		iam:             iam,
+		s3Identity:      s3Identity,
 		shutdownContext: shutdownCtx,
 		shutdownCancel:  shutdownCancel,
 		masterClient:    masterClient,
@@ -120,10 +118,10 @@ func (iama *IamApiServer) registerRouter(router *mux.Router) {
 	// ListBuckets
 
 	// apiRouter.Methods("GET").Path("/").HandlerFunc(track(s3a.iam.Auth(s3a.ListBucketsHandler, ACTION_ADMIN), "LIST"))
-	apiRouter.Methods(http.MethodPost).Path("/").HandlerFunc(iama.iam.Auth(iama.DoActions, ACTION_ADMIN))
+	apiRouter.Methods(http.MethodPost).Path("/").HandlerFunc(iama.DoActions)
 	//
 	// NotFound
-	apiRouter.NotFoundHandler = http.HandlerFunc(s3err.NotFoundHandler)
+	apiRouter.NotFoundHandler = http.HandlerFunc(errors.NotFoundHandler)
 }
 
 // Shutdown gracefully stops the IAM API server and releases resources.

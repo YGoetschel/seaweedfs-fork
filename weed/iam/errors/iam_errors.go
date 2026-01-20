@@ -143,3 +143,24 @@ func (e ErrorCode) HTTPStatusCode() int {
 	}
 	return apiError.HTTPStatusCode
 }
+
+// WriteXMLResponse writes an IAM error response as XML
+func WriteXMLResponse(w http.ResponseWriter, r *http.Request, statusCode int, response interface{}) {
+w.Header().Set("Content-Type", "application/xml")
+w.WriteHeader(statusCode)
+xml.NewEncoder(w).Encode(response)
+}
+
+// NotFoundHandler handles 404 errors for IAM API
+func NotFoundHandler(w http.ResponseWriter, r *http.Request) {
+	errorResponse := IAMErrorResponse{
+		Error: IAMError{
+			Type:    "Sender",
+			Code:    "NoSuchEntity",
+			Message: "The resource you requested does not exist.",
+		},
+		RequestID: r.Header.Get("X-Request-ID"),
+	}
+	WriteXMLResponse(w, r, http.StatusNotFound, errorResponse)
+}
+

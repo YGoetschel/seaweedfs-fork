@@ -1,10 +1,10 @@
 package iamapi
 
-import (
+	import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
-	"errors"
+	stderr "errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -15,13 +15,13 @@ import (
 	"time"
 
 	"github.com/seaweedfs/seaweedfs/weed/glog"
+	"github.com/seaweedfs/seaweedfs/weed/iam/constants"
+	"github.com/seaweedfs/seaweedfs/weed/iam/errors"
 	"github.com/seaweedfs/seaweedfs/weed/iam/integration"
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/iam_pb"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/s3_constants"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/s3err"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 
 	"github.com/aws/aws-sdk-go/service/iam"
 )
@@ -50,21 +50,21 @@ var (
 func MapToStatementAction(action string) string {
 	switch action {
 	case StatementActionAdmin:
-		return s3_constants.ACTION_ADMIN
+		return constants.ACTION_ADMIN
 	case StatementActionWrite:
-		return s3_constants.ACTION_WRITE
+		return constants.ACTION_WRITE
 	case StatementActionWriteAcp:
-		return s3_constants.ACTION_WRITE_ACP
+		return constants.ACTION_WRITE_ACP
 	case StatementActionRead:
-		return s3_constants.ACTION_READ
+		return constants.ACTION_READ
 	case StatementActionReadAcp:
-		return s3_constants.ACTION_READ_ACP
+		return constants.ACTION_READ_ACP
 	case StatementActionList:
-		return s3_constants.ACTION_LIST
+		return constants.ACTION_LIST
 	case StatementActionTagging:
-		return s3_constants.ACTION_TAGGING
+		return constants.ACTION_TAGGING
 	case StatementActionDelete:
-		return s3_constants.ACTION_DELETE_BUCKET
+		return constants.ACTION_DELETE_BUCKET
 	default:
 		return ""
 	}
@@ -72,21 +72,21 @@ func MapToStatementAction(action string) string {
 
 func MapToIdentitiesAction(action string) string {
 	switch action {
-	case s3_constants.ACTION_ADMIN:
+	case constants.ACTION_ADMIN:
 		return StatementActionAdmin
-	case s3_constants.ACTION_WRITE:
+	case constants.ACTION_WRITE:
 		return StatementActionWrite
-	case s3_constants.ACTION_WRITE_ACP:
+	case constants.ACTION_WRITE_ACP:
 		return StatementActionWriteAcp
-	case s3_constants.ACTION_READ:
+	case constants.ACTION_READ:
 		return StatementActionRead
-	case s3_constants.ACTION_READ_ACP:
+	case constants.ACTION_READ_ACP:
 		return StatementActionReadAcp
-	case s3_constants.ACTION_LIST:
+	case constants.ACTION_LIST:
 		return StatementActionList
-	case s3_constants.ACTION_TAGGING:
+	case constants.ACTION_TAGGING:
 		return StatementActionTagging
-	case s3_constants.ACTION_DELETE_BUCKET:
+	case constants.ACTION_DELETE_BUCKET:
 		return StatementActionDelete
 	default:
 		return ""
@@ -342,7 +342,7 @@ func (iama *IamApiServer) GetUserPolicy(s3cfg *iam_pb.S3ApiConfiguration, values
 		resp.GetUserPolicyResult.UserName = userName
 		resp.GetUserPolicyResult.PolicyName = policyName
 		if len(ident.Actions) == 0 {
-			return resp, &IamError{Code: iam.ErrCodeNoSuchEntityException, Error: errors.New("no actions found")}
+			return resp, &IamError{Code: iam.ErrCodeNoSuchEntityException, Error: stderr.New("no actions found")}
 		}
 
 		policyDocument := policy_engine.PolicyDocument{Version: policyDocumentVersion}
@@ -1519,11 +1519,11 @@ func (iama *IamApiServer) DoActions(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = false
 	default:
-		errNotImplemented := s3err.GetAPIError(s3err.ErrNotImplemented)
+		errNotImplemented := errors.GetAPIError(errors.ErrNotImplemented)
 		errorResponse := ErrorResponse{}
 		errorResponse.Error.Code = &errNotImplemented.Code
 		errorResponse.Error.Message = &errNotImplemented.Description
-		s3err.WriteXMLResponse(w, r, errNotImplemented.HTTPStatusCode, errorResponse)
+		errors.WriteXMLResponse(w, r, errNotImplemented.HTTPStatusCode, errorResponse)
 		return
 	}
 	if changed {
@@ -1534,7 +1534,7 @@ func (iama *IamApiServer) DoActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s3err.WriteXMLResponse(w, r, http.StatusOK, response)
+	errors.WriteXMLResponse(w, r, http.StatusOK, response)
 }
 // GetPolicy retrieves a managed policy by ARN
 // https://docs.aws.amazon.com/IAM/latest/APIReference/API_GetPolicy.html
