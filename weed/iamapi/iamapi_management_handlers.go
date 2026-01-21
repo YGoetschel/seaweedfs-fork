@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -19,9 +18,9 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/iam_pb"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/s3_constants"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/s3err"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/constants"
+	iam_errors "github.com/seaweedfs/seaweedfs/weed/iam/errors"
 
 	"github.com/aws/aws-sdk-go/service/iam"
 )
@@ -41,8 +40,8 @@ const (
 )
 
 var (
-	seededRand *rand.Rand = rand.New(
-		rand.NewSource(time.Now().UnixNano()))
+	// TODO: Refactor to remove this global map - potential memory leak
+	// Consider moving to instance-scoped storage or using policy engine's cache
 	policyDocuments = map[string]*policy_engine.PolicyDocument{}
 	policyLock      = sync.RWMutex{}
 )
@@ -50,21 +49,21 @@ var (
 func MapToStatementAction(action string) string {
 	switch action {
 	case StatementActionAdmin:
-		return s3_constants.ACTION_ADMIN
+		return constants.ActionAdmin
 	case StatementActionWrite:
-		return s3_constants.ACTION_WRITE
+		return constants.ActionWrite
 	case StatementActionWriteAcp:
-		return s3_constants.ACTION_WRITE_ACP
+		return constants.ActionWriteAcp
 	case StatementActionRead:
-		return s3_constants.ACTION_READ
+		return constants.ActionRead
 	case StatementActionReadAcp:
-		return s3_constants.ACTION_READ_ACP
+		return constants.ActionReadAcp
 	case StatementActionList:
-		return s3_constants.ACTION_LIST
+		return constants.ActionList
 	case StatementActionTagging:
-		return s3_constants.ACTION_TAGGING
+		return constants.ActionTagging
 	case StatementActionDelete:
-		return s3_constants.ACTION_DELETE_BUCKET
+		return constants.ActionDeleteBucket
 	default:
 		return ""
 	}
@@ -72,21 +71,21 @@ func MapToStatementAction(action string) string {
 
 func MapToIdentitiesAction(action string) string {
 	switch action {
-	case s3_constants.ACTION_ADMIN:
+	case constants.ActionAdmin:
 		return StatementActionAdmin
-	case s3_constants.ACTION_WRITE:
+	case constants.ActionWrite:
 		return StatementActionWrite
-	case s3_constants.ACTION_WRITE_ACP:
+	case constants.ActionWriteAcp:
 		return StatementActionWriteAcp
-	case s3_constants.ACTION_READ:
+	case constants.ActionRead:
 		return StatementActionRead
-	case s3_constants.ACTION_READ_ACP:
+	case constants.ActionReadAcp:
 		return StatementActionReadAcp
-	case s3_constants.ACTION_LIST:
+	case constants.ActionList:
 		return StatementActionList
-	case s3_constants.ACTION_TAGGING:
+	case constants.ActionTagging:
 		return StatementActionTagging
-	case s3_constants.ACTION_DELETE_BUCKET:
+	case constants.ActionDeleteBucket:
 		return StatementActionDelete
 	default:
 		return ""
@@ -107,13 +106,6 @@ func Hash(s *string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func StringWithCharset(length int, charset string) string {
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[seededRand.Intn(len(charset))]
-	}
-	return string(b)
-}
 
 func (iama *IamApiServer) ListUsers(s3cfg *iam_pb.S3ApiConfiguration, values url.Values) (resp ListUsersResponse) {
 	for _, ident := range s3cfg.Identities {
@@ -465,8 +457,20 @@ func GetActions(policy *policy_engine.PolicyDocument) ([]string, error) {
 func (iama *IamApiServer) CreateAccessKey(s3cfg *iam_pb.S3ApiConfiguration, values url.Values) (resp CreateAccessKeyResponse, iamError *IamError) {
 	userName := values.Get("UserName")
 	status := iam.StatusTypeActive
-	accessKeyId := StringWithCharset(21, charsetUpper)
-	secretAccessKey := StringWithCharset(42, charset)
+	accessKeyId, err := generateSecureAccessKey()
+	if err != nil {
+		return resp, &IamError{
+			Code:  iam.ErrCodeServiceFailureException,
+			Error: err,
+		}
+	}
+	secretAccessKey, err := generateSecureSecretKey()
+	if err != nil {
+		return resp, &IamError{
+			Code:  iam.ErrCodeServiceFailureException,
+			Error: err,
+		}
+	}
 	resp.CreateAccessKeyResult.AccessKey.AccessKeyId = &accessKeyId
 	resp.CreateAccessKeyResult.AccessKey.SecretAccessKey = &secretAccessKey
 	resp.CreateAccessKeyResult.AccessKey.UserName = &userName
@@ -645,14 +649,10 @@ func checkBoolPtr(b bool) *bool {
 	return &b
 }
 
+// getIamManager returns the IAM manager instance
+// This is guaranteed to be non-nil by constructor validation
 func (iama *IamApiServer) getIamManager() *integration.IAMManager {
-	if iama.iam == nil {
-		return nil
-	}
-	if integration := iama.iam.GetIAMIntegration(); integration != nil {
-		return integration.GetIAMManager()
-	}
-	return nil
+	return iama.iamManager
 }
 
 func (iama *IamApiServer) CreateRole(ctx context.Context, values url.Values) (resp CreateRoleResponse, iamError *IamError) {
@@ -1519,11 +1519,8 @@ func (iama *IamApiServer) DoActions(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = false
 	default:
-		errNotImplemented := s3err.GetAPIError(s3err.ErrNotImplemented)
-		errorResponse := ErrorResponse{}
-		errorResponse.Error.Code = &errNotImplemented.Code
-		errorResponse.Error.Message = &errNotImplemented.Description
-		s3err.WriteXMLResponse(w, r, errNotImplemented.HTTPStatusCode, errorResponse)
+		iamError := &IamError{Code: iam.ErrCodeServiceFailureException, Error: fmt.Errorf("Not Implemented")}
+		writeIamErrorResponse(w, r, iamError)
 		return
 	}
 	if changed {
@@ -1534,7 +1531,7 @@ func (iama *IamApiServer) DoActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s3err.WriteXMLResponse(w, r, http.StatusOK, response)
+	iam_errors.WriteXMLResponse(w, r, http.StatusOK, response)
 }
 // GetPolicy retrieves a managed policy by ARN
 // https://docs.aws.amazon.com/IAM/latest/APIReference/API_GetPolicy.html

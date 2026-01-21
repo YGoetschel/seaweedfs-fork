@@ -727,8 +727,26 @@ func loadIAMManagerFromConfig(configPath string, filerAddressProvider func() str
 	}
 
 	// Create IAM configuration
+	// Note: We need to map from config-specific struct to integration.IAMConfig
+	// because integration.STSConfig might differ or be compatible but need explicit assigning
+	// if structs are identical but different types.
+	// Actually configRoot.STS is *sts.STSConfig, we need *integration.STSConfig
+	// We need to convert or change the field type in configRoot. However json unmarshal needs to work.
+	
+	// Create adapter config manually mapping fields
+	var stsConfig *integration.STSConfig
+	if configRoot.STS != nil {
+		stsConfig = &integration.STSConfig{
+			TokenDuration:    configRoot.STS.TokenDuration.Duration.String(),
+			MaxSessionLength: configRoot.STS.MaxSessionLength.Duration.String(),
+			Issuer:           configRoot.STS.Issuer,
+			SigningKey:       configRoot.STS.SigningKey,
+			AccountId:        configRoot.STS.AccountId,
+		}
+	}
+
 	iamConfig := &integration.IAMConfig{
-		STS:    configRoot.STS,
+		STS:    stsConfig,
 		Policy: configRoot.Policy,
 		Roles:  roleStoreConfig,
 		Groups: groupStoreConfig,

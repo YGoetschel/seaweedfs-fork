@@ -5,7 +5,7 @@ import (
 
 	"github.com/seaweedfs/seaweedfs/weed/glog"
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 )
 
 // ConvertPolicyDocumentToPolicyEngine converts a policy.PolicyDocument to policy_engine.PolicyDocument

@@ -14,7 +14,6 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/iam/integration"
 	"github.com/seaweedfs/seaweedfs/weed/iam/ldap"
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
-	"github.com/seaweedfs/seaweedfs/weed/iam/sts"
 )
 
 // RoleMappingRule defines a rule to map external groups to IAM roles
@@ -49,9 +48,9 @@ func (s *AdminServer) initIAMManager() {
 
 	// Initial configuration
 	iamConfig := &integration.IAMConfig{
-		STS: &sts.STSConfig{
-			TokenDuration:    sts.FlexibleDuration{Duration: 24 * time.Hour},
-			MaxSessionLength: sts.FlexibleDuration{Duration: 24 * time.Hour},
+		STS: &integration.STSConfig{
+			TokenDuration:    "24h",
+			MaxSessionLength: "24h",
 			Issuer:           "seaweedfs-admin",
 			// SigningKey will be loaded or generated/persisted
 		},
@@ -157,7 +156,7 @@ func (s *AdminServer) initIAMManager() {
 	// Clear providers from config to prevent auto-loading failure
 	// We will manually load and register them below
 	if iamConfig.STS != nil {
-		iamConfig.STS.Providers = nil
+		// Providers not in integration config, no need to clear
 	}
 
 	// Initialize with filer address provider

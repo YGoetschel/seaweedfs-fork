@@ -6,7 +6,7 @@ import (
 
 	"github.com/seaweedfs/seaweedfs/weed/credential"
 	"github.com/seaweedfs/seaweedfs/weed/credential/memory"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 
 	// Import all store implementations to register them
 	_ "github.com/seaweedfs/seaweedfs/weed/credential/filer_etc"

@@ -8,7 +8,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/glog"
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 )
 
 // BucketPolicyEngine wraps the policy_engine to provide bucket policy evaluation

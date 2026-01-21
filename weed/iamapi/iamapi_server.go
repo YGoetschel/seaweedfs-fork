@@ -12,17 +12,21 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/seaweedfs/seaweedfs/weed/credential"
+	"github.com/seaweedfs/seaweedfs/weed/credential/filer_etc"
 	"github.com/seaweedfs/seaweedfs/weed/filer"
 	"github.com/seaweedfs/seaweedfs/weed/glog"
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/iam_pb"
-	"github.com/seaweedfs/seaweedfs/weed/s3api"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
-	. "github.com/seaweedfs/seaweedfs/weed/s3api/s3_constants"
+	"github.com/seaweedfs/seaweedfs/weed/iam/integration"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/constants"
+	"github.com/seaweedfs/seaweedfs/weed/iam/errors"
 	"github.com/seaweedfs/seaweedfs/weed/s3api/s3err"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 	"github.com/seaweedfs/seaweedfs/weed/wdclient"
+	"github.com/aws/aws-sdk-go/service/iam"
 	"google.golang.org/grpc"
 )
 
@@ -57,7 +61,8 @@ type IamServerOption struct {
 
 type IamApiServer struct {
 	s3ApiConfig      IamS3ApiConfig
-	iam              *s3api.IdentityAccessManagement
+	s3Identity       S3IdentityManager
+	iamManager       *integration.IAMManager
 	shutdownContext  context.Context
 	shutdownCancel   context.CancelFunc
 	masterClient     *wdclient.MasterClient
@@ -93,25 +98,104 @@ func NewIamApiServerWithStore(router *mux.Router, option *IamServerOption, expli
 
 	s3ApiConfigure = configure
 
-	s3Option := s3api.S3ApiServerOption{
-		Filers:         option.Filers,
-		GrpcDialOption: option.GrpcDialOption,
+	// For standalone IAM (PR2), we use the stub S3IdentityManager
+	// In the future (PR4), this will be replaced by the real S3 integration
+	s3Identity := &StubS3IdentityManager{}
+	
+	// Create credential manager for user/policy storage
+	cm, err := credential.NewCredentialManager(credential.StoreTypeFilerEtc, util.GetViper(), "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create credential manager: %w", err)
 	}
-
-	iam := s3api.NewIdentityAccessManagementWithStore(&s3Option, explicitStore)
-	configure.credentialManager = iam.GetCredentialManager()
+	
+	// Configure FilerEtcStore with explicit filer address if available
+	// This is necessary because util.GetViper() might not have the correct configuration
+	// when running as the 'iam' command where filer address is passed via options
+	if store, ok := cm.GetStore().(*filer_etc.FilerEtcStore); ok && len(option.Filers) > 0 {
+		store.SetFilerAddressFunc(func() pb.ServerAddress {
+			// Use the first configured filer
+			return option.Filers[0]
+		}, option.GrpcDialOption)
+	}
+	
+	configure.credentialManager = cm
+	
+	// Initialize standalone IAM Manager
+	iamManager := integration.NewIAMManager()
+	// Configure IAM Manager with proper defaults
+	iamConfig := &integration.IAMConfig{
+		Policy: &policy.PolicyEngineConfig{DefaultEffect: "Deny"},
+		Roles:  &integration.RoleStoreConfig{StoreType: "filer"},
+		Groups: &integration.GroupStoreConfig{StoreType: "filer"},
+	}
+	if err := iamManager.Initialize(iamConfig, func() string {
+		if len(option.Filers) > 0 {
+			return string(option.Filers[0])
+		}
+		return ""
+	}, masterClient); err != nil {
+		return nil, fmt.Errorf("failed to initialize IAM manager: %w", err)
+	}
 
 	iamApiServer = &IamApiServer{
 		s3ApiConfig:     s3ApiConfigure,
-		iam:             iam,
+		s3Identity:      s3Identity,
+		iamManager:      iamManager,
 		shutdownContext: shutdownCtx,
 		shutdownCancel:  shutdownCancel,
 		masterClient:    masterClient,
 	}
 
+	// Verify iamManager is properly initialized (fail-fast)
+	if iamApiServer.iamManager == nil {
+		return nil, fmt.Errorf("IAM manager initialization failed: manager is nil")
+	}
+
 	iamApiServer.registerRouter(router)
 
 	return iamApiServer, nil
+}
+
+// SetIAM sets the S3 identity manager for the IAM server
+// This enables the IAM API to interact with the underlying S3 identity system (legacy)
+func (iama *IamApiServer) SetIAM(s3Identity S3IdentityManager) {
+	iama.s3Identity = s3Identity
+}
+
+// GetIAMManager returns the internal IAMManager instance
+// This allows other components (like S3 middleware) to share the same IAM state
+func (iama *IamApiServer) GetIAMManager() *integration.IAMManager {
+	return iama.iamManager
+}
+
+// Auth wraps a handler with authentication/authorization checks
+// Validates AWS Signature V4 and verifies the caller has admin permissions
+func (iama *IamApiServer) Auth(handler http.HandlerFunc, action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Authenticate the request using AWS SigV4
+		identity, err := iama.s3ApiConfig.(*IamS3ApiConfigure).AuthenticateRequest(r)
+		if err != nil {
+			glog.Warningf("IAM API authentication failed for action %s: %v", action, err)
+			writeIamErrorResponse(w, r, &IamError{
+				Code:  iam.ErrCodeServiceFailureException,
+				Error: fmt.Errorf("authentication failed"),
+			})
+			return
+		}
+
+		// 2. Verify the caller has admin permissions
+		if !hasAdminPermissions(identity) {
+			glog.Warningf("IAM API access denied for user %s attempting action %s: insufficient permissions", identity.Name, action)
+			writeIamErrorResponse(w, r, &IamError{
+			Code:  iam.ErrCodeServiceFailureException,
+				Error: fmt.Errorf("insufficient permissions for IAM management operations"),
+			})
+			return
+		}
+
+		glog.V(2).Infof("IAM API authenticated request from %s for action %s", identity.Name, action)
+		handler(w, r)
+	}
 }
 
 func (iama *IamApiServer) registerRouter(router *mux.Router) {
@@ -120,24 +204,47 @@ func (iama *IamApiServer) registerRouter(router *mux.Router) {
 	// ListBuckets
 
 	// apiRouter.Methods("GET").Path("/").HandlerFunc(track(s3a.iam.Auth(s3a.ListBucketsHandler, ACTION_ADMIN), "LIST"))
-	apiRouter.Methods(http.MethodPost).Path("/").HandlerFunc(iama.iam.Auth(iama.DoActions, ACTION_ADMIN))
+	apiRouter.Methods(http.MethodPost).Path("/").HandlerFunc(iama.Auth(iama.DoActions, "iam:*"))
 	//
 	// NotFound
-	apiRouter.NotFoundHandler = http.HandlerFunc(s3err.NotFoundHandler)
+	apiRouter.NotFoundHandler = http.HandlerFunc(errors.NotFoundHandler)
 }
 
 // Shutdown gracefully stops the IAM API server and releases resources.
-// It cancels the master client connection goroutine and closes gRPC connections.
-// This method is safe to call multiple times.
+// It implements a graceful shutdown with timeout, allowing in-flight requests
+// to complete while ensuring resources are properly cleaned up.
 //
-// Note: This method is called via defer in weed/command/iam.go for best-effort cleanup.
-// For proper graceful shutdown on SIGTERM/SIGINT, signal handling should be added to
-// the command layer to call this method before process exit.
+// Shutdown process:
+// 1. Cancels master client connection goroutine
+// 2. Closes credential manager and stores
+// 3. Releases gRPC connections
+//
+// This method is safe to call multiple times (subsequent calls are no-ops).
 func (iama *IamApiServer) Shutdown() {
-	if iama.shutdownCancel != nil {
-		glog.V(0).Infof("IAM API server shutting down, stopping master client connection")
-		iama.shutdownCancel()
+	if iama.shutdownCancel == nil {
+		glog.V(0).Infof("IAM API server shutdown called but already shutdown or not initialized")
+		return
 	}
+
+	glog.V(0).Infof("IAM API server initiating graceful shutdown...")
+
+	// Cancel the master client connection context
+	iama.shutdownCancel()
+
+	// Close credential manager if available
+	if iama.s3ApiConfig != nil {
+		if configure, ok := iama.s3ApiConfig.(*IamS3ApiConfigure); ok && configure.credentialManager != nil {
+			glog.V(0).Infof("IAM API server closing credential manager...")
+			if err := configure.credentialManager.Shutdown(); err != nil {
+				glog.Warningf("Error closing credential manager during shutdown: %v", err)
+			}
+		}
+	}
+
+	// Mark as shutdown (prevent double shutdown)
+	iama.shutdownCancel = nil
+
+	glog.V(0).Infof("IAM API server shutdown complete")
 }
 
 func (iama *IamS3ApiConfigure) GetS3ApiConfiguration(s3cfg *iam_pb.S3ApiConfiguration) (err error) {
@@ -317,4 +424,63 @@ func (iama *IamS3ApiConfigure) CreateAccessKey(username string, cred *iam_pb.Cre
 
 func (iama *IamS3ApiConfigure) DeleteAccessKey(username string, accessKey string) (err error) {
 	return iama.credentialManager.DeleteAccessKey(context.Background(), username, accessKey)
+}
+
+// AuthenticateRequest authenticates an IAM API request using AWS Signature V4
+func (iama *IamS3ApiConfigure) AuthenticateRequest(r *http.Request) (*iam_pb.Identity, error) {
+	// Parse AWS SigV4 authorization header
+	var authInfo *v4AuthInfo
+	var errCode s3err.ErrorCode
+	
+	if isRequestPresignedSignatureV4(r) {
+		authInfo, errCode = extractV4AuthInfoFromQuery(r)
+	} else {
+		authInfo, errCode = extractV4AuthInfoFromHeader(r)
+	}
+	
+	if errCode != s3err.ErrNone {
+		return nil, fmt.Errorf("failed to parse authorization: %s", errCode)
+	}
+	
+	// Lookup user by access key
+	identity, err := iama.credentialManager.GetUserByAccessKey(context.Background(), authInfo.AccessKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid access key: %w", err)
+	}
+	
+	// Get the credential for signature verification
+	var credential *iam_pb.Credential
+	for _, cred := range identity.Credentials {
+		if cred.AccessKey == authInfo.AccessKey {
+			credential = cred
+			break
+		}
+	}
+	
+	if credential == nil {
+		return nil, fmt.Errorf("credential not found for access key")
+	}
+	
+	// Verify the signature
+	if err := verifyIAMSignature(r, credential.SecretKey, authInfo); err != nil {
+		return nil, fmt.Errorf("signature verification failed: %w", err)
+	}
+	
+	return identity, nil
+}
+
+// hasAdminPermissions checks if a user has IAM management permissions
+func hasAdminPermissions(identity *iam_pb.Identity) bool {
+	if identity == nil {
+		return false
+	}
+	
+	// Check if user has admin action permission
+	for _, action := range identity.Actions {
+		if action == constants.ActionAdmin {
+			return true
+		}
+	}
+	
+	return false
 }

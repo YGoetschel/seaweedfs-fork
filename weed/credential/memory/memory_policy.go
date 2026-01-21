@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 )
 
 // GetPolicies retrieves all IAM policies from memory

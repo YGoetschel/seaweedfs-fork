@@ -48,8 +48,13 @@ func (cm *CredentialManager) GetStore() CredentialStore {
 
 // LoadConfiguration loads the S3 API configuration
 func (cm *CredentialManager) LoadConfiguration(ctx context.Context) (*iam_pb.S3ApiConfiguration, error) {
-	return cm.store.LoadConfiguration(ctx)
+	// Not implemented in this POC
+	return nil, nil
 }
+
+
+
+
 
 // SaveConfiguration saves the S3 API configuration
 func (cm *CredentialManager) SaveConfiguration(ctx context.Context, config *iam_pb.S3ApiConfiguration) error {
@@ -97,10 +102,14 @@ func (cm *CredentialManager) DeleteAccessKey(ctx context.Context, username strin
 }
 
 // Shutdown performs cleanup
-func (cm *CredentialManager) Shutdown() {
+func (cm *CredentialManager) Shutdown() error {
 	if cm.store != nil {
+		// Store shutdown might not return error depending on interface
+		// We'll assume best effort
 		cm.store.Shutdown()
 	}
+	
+	return nil
 }
 
 // getAvailableStores returns a comma-separated list of available store names

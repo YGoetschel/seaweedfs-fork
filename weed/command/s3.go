@@ -325,6 +325,10 @@ func (s3opt *S3Options) startS3Server() bool {
 			// This ensures they share the same data and configuration
 			iamServer.SetIAM(s3ApiServer.GetIAM())
 
+			// Configure S3 Server to use the new IAM Manager for its middleware
+			// This enables the new Policy Engine and decoupling features
+			s3ApiServer.SetIAMIntegration(iamServer.GetIAMManager())
+
 			// Inject the IAM handler into S3 server
 			s3ApiServer.SetIAMActionHandler(iamServer)
 			glog.V(0).Infof("IAM action handler injected - IAM APIs available on S3 endpoint")

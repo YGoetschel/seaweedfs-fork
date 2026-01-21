@@ -12,7 +12,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/admin/view/app"
 	"github.com/seaweedfs/seaweedfs/weed/admin/view/layout"
 	"github.com/seaweedfs/seaweedfs/weed/glog"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 )
 
 // PolicyHandlers contains all the HTTP handlers for policy management

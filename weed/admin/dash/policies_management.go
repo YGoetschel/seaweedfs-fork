@@ -8,7 +8,7 @@ import (
 
 	"github.com/seaweedfs/seaweedfs/weed/credential"
 	"github.com/seaweedfs/seaweedfs/weed/glog"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 )
 
 // IAMPolicy struct removed in favor of ClientIAMPolicy defined in iam_client.go

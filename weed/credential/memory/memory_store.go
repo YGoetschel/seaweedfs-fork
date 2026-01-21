@@ -5,7 +5,7 @@ import (
 
 	"github.com/seaweedfs/seaweedfs/weed/credential"
 	"github.com/seaweedfs/seaweedfs/weed/pb/iam_pb"
-	"github.com/seaweedfs/seaweedfs/weed/s3api/policy_engine"
+	"github.com/seaweedfs/seaweedfs/weed/iam/policy_engine"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 )
 

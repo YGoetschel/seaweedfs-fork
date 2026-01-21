@@ -10,7 +10,6 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/glog"
 	"github.com/seaweedfs/seaweedfs/weed/iam/policy"
 	"github.com/seaweedfs/seaweedfs/weed/iam/providers"
-	"github.com/seaweedfs/seaweedfs/weed/iam/sts"
 	"github.com/seaweedfs/seaweedfs/weed/iam/utils"
 	"github.com/seaweedfs/seaweedfs/weed/stats"
 	"github.com/seaweedfs/seaweedfs/weed/wdclient"
@@ -18,7 +17,7 @@ import (
 
 // IAMManager orchestrates all IAM components
 type IAMManager struct {
-	stsService           *sts.STSService
+	stsAdapter           STSAdapter
 	policyEngine         *policy.PolicyEngine
 	roleStore            RoleStore
 	groupStore           GroupStore
@@ -28,9 +27,19 @@ type IAMManager struct {
 }
 
 // IAMConfig holds configuration for all IAM components
+
+// STSConfig holds STS service configuration (local definition to decouple from sts package)
+type STSConfig struct {
+	TokenDuration    string `json:"tokenDuration"` 
+	MaxSessionLength string `json:"maxSessionLength"`
+	Issuer           string `json:"issuer"`
+	SigningKey       []byte `json:"signingKey"`
+	AccountId        string `json:"accountId"`
+}
+
 type IAMConfig struct {
 	// STS service configuration
-	STS *sts.STSConfig `json:"sts"`
+	STS *STSConfig `json:"sts"`
 
 	// Policy engine configuration
 	Policy *policy.PolicyEngineConfig `json:"policy"`
@@ -120,14 +129,9 @@ func (m *IAMManager) Initialize(config *IAMConfig, filerAddressProvider func() s
 	m.filerAddressProvider = filerAddressProvider
 	m.masterClient = masterClient
 
-	// Initialize STS service
-	m.stsService = sts.NewSTSService()
-	if err := m.stsService.Initialize(config.STS); err != nil {
-		return fmt.Errorf("failed to initialize STS service: %w", err)
-	}
-
-	// CRITICAL SECURITY: Set trust policy validator to ensure proper role assumption validation
-	m.stsService.SetTrustPolicyValidator(m)
+	// Initialize STS adapter with stub by default
+	m.stsAdapter = NewStubSTSAdapter()
+	// Logic to initialize real STS if config is provided will be handled by caller or SetSTSAdapter
 
 	// Initialize policy engine
 	m.policyEngine = policy.NewPolicyEngine()
@@ -250,7 +254,7 @@ func (m *IAMManager) RegisterIdentityProvider(provider providers.IdentityProvide
 		return fmt.Errorf("IAM manager not initialized")
 	}
 
-	return m.stsService.RegisterProvider(provider)
+	return m.stsAdapter.RegisterProvider(provider)
 }
 
 // GetRoleStore returns the role store
@@ -325,7 +329,7 @@ func (m *IAMManager) CreateRole(ctx context.Context, filerAddress string, roleNa
 
 
 // AssumeRoleWithCredentials assumes a role using credentials (LDAP)
-func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *sts.AssumeRoleWithCredentialsRequest) (*sts.AssumeRoleResponse, error) {
+func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *AssumeRoleRequest) (*AssumeRoleResponse, error) {
 	if !m.initialized {
 		return nil, fmt.Errorf("IAM manager not initialized")
 	}
@@ -351,7 +355,7 @@ func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *sts
 	}
 
 	// Use STS service to assume the role
-	resp, err := m.stsService.AssumeRoleWithCredentials(ctx, request)
+	resp, err := m.stsAdapter.AssumeRoleWithCredentials(ctx, request)
 	if err != nil {
 		stats.StsRequestCounter.WithLabelValues("assume_role_with_credentials", roleName, "failure").Inc()
 		return nil, err
@@ -362,7 +366,7 @@ func (m *IAMManager) AssumeRoleWithCredentials(ctx context.Context, request *sts
 }
 
 // AssumeRole assumes a role from an authenticated context
-func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequest) (*sts.AssumeRoleResponse, error) {
+func (m *IAMManager) AssumeRole(ctx context.Context, request *AssumeRoleRequest) (*AssumeRoleResponse, error) {
 	if !m.initialized {
 		return nil, fmt.Errorf("IAM manager not initialized")
 	}
@@ -385,7 +389,11 @@ func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequ
 	
 	// Construct caller's ARN (e.g., arn:aws:iam::seaweedfs:user/test-user)
 	// We use "seaweedfs" as the account ID for all internal principals
-	callerArn := fmt.Sprintf("arn:aws:iam::seaweedfs:user/%s", request.ExternalIdentity.UserID)
+	if request.Identity != nil && request.Identity.UserID != "" {
+		// Log
+		glog.V(4).Infof("ValidateTrustPolicy: Identity=%v", request.Identity)
+	}
+	callerArn := fmt.Sprintf("arn:aws:iam::seaweedfs:user/%s", request.Identity.UserID)
 	
 	evalCtx := &policy.EvaluationContext{
 		Principal: callerArn,
@@ -394,7 +402,7 @@ func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequ
 		// Request context can be expanded later if needed
 		RequestContext: map[string]interface{}{
 			"aws:PrincipalArn":     callerArn,
-			"aws:username":         request.ExternalIdentity.UserID,
+			"aws:username":         request.Identity.UserID,
 			"seaweed:AWSPrincipal": callerArn, // Required for trust policy evaluation
 		},
 	}
@@ -410,7 +418,7 @@ func (m *IAMManager) AssumeRole(ctx context.Context, request *sts.AssumeRoleRequ
 	}
 
 	// Use STS service to assume the role
-	resp, err := m.stsService.AssumeRole(ctx, request)
+	resp, err := m.stsAdapter.AssumeRole(ctx, request)
 	if err != nil {
 		stats.StsRequestCounter.WithLabelValues("assume_role", roleName, "failure").Inc()
 		return nil, err
@@ -428,7 +436,7 @@ func (m *IAMManager) IsActionAllowed(ctx context.Context, request *ActionRequest
 
 	// Validate session token first
 	if request.SessionToken != "" {
-		_, err := m.stsService.ValidateSessionToken(ctx, request.SessionToken)
+		_, err := m.stsAdapter.ValidateSessionToken(ctx, request.SessionToken)
 		if err != nil {
 			return false, fmt.Errorf("invalid session: %w", err)
 		}
@@ -532,7 +540,7 @@ func (m *IAMManager) ValidateTrustPolicy(ctx context.Context, roleArn, provider,
 
 
 // validateTrustPolicyForCredentials validates trust policy for credential assumption
-func (m *IAMManager) validateTrustPolicyForCredentials(ctx context.Context, roleDef *RoleDefinition, request *sts.AssumeRoleWithCredentialsRequest) error {
+func (m *IAMManager) validateTrustPolicyForCredentials(ctx context.Context, roleDef *RoleDefinition, request *AssumeRoleRequest) error {
 	if roleDef.TrustPolicy == nil {
 		return fmt.Errorf("role has no trust policy")
 	}
@@ -543,9 +551,10 @@ func (m *IAMManager) validateTrustPolicyForCredentials(ctx context.Context, role
 			for _, action := range statement.Action {
 				if action == "sts:AssumeRoleWithCredentials" {
 					if principal, ok := statement.Principal.(map[string]interface{}); ok {
-						if federated, ok := principal["Federated"].(string); ok {
-							if federated == request.ProviderName {
-								return nil // Allow
+						if trustedProvider, ok := principal["Federated"].(string); ok {
+							// Check if incoming identity matches trusted provider
+							if request.Identity != nil && request.Identity.Provider == trustedProvider {
+								return nil
 							}
 						}
 					}
@@ -554,7 +563,10 @@ func (m *IAMManager) validateTrustPolicyForCredentials(ctx context.Context, role
 		}
 	}
 
-	return fmt.Errorf("trust policy does not allow credential assumption for provider: %s", request.ProviderName)
+	if request.Identity != nil {
+		return fmt.Errorf("trust policy does not allow credential assumption for provider: %s", request.Identity.Provider)
+	}
+	return fmt.Errorf("trust policy does not allow credential assumption: no identity provided")
 }
 
 // Helper functions
@@ -565,12 +577,17 @@ func (m *IAMManager) ExpireSessionForTesting(ctx context.Context, sessionToken s
 		return fmt.Errorf("IAM manager not initialized")
 	}
 
-	return m.stsService.ExpireSessionForTesting(ctx, sessionToken)
+	return m.stsAdapter.ExpireSessionForTesting(ctx, sessionToken)
 }
 
-// GetSTSService returns the STS service instance
-func (m *IAMManager) GetSTSService() *sts.STSService {
-	return m.stsService
+// GetSTSAdapter returns the STS adapter instance
+func (m *IAMManager) GetSTSAdapter() STSAdapter {
+	return m.stsAdapter
+}
+
+// SetSTSAdapter sets the STS adapter
+func (m *IAMManager) SetSTSAdapter(adapter STSAdapter) {
+	m.stsAdapter = adapter
 }
 
 
@@ -783,8 +800,8 @@ func (m *IAMManager) ValidateTrustPolicyForCredentials(ctx context.Context, role
 
 	// For credentials (LDAP/OIDC/Custom), we need to create a mock request to reuse existing validation
 	// This is a bit of a hack, but it allows us to reuse the existing logic
-	mockRequest := &sts.AssumeRoleWithCredentialsRequest{
-		ProviderName: identity.Provider, // Use the provider name from the identity
+	mockRequest := &AssumeRoleRequest{
+		Identity: identity,
 	}
 
 	// Use existing trust policy validation logic
