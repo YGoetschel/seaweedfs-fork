@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"bytes"
 	"net/http"
 	"sort"
 	"strings"
@@ -101,6 +103,27 @@ func extractV4AuthInfoFromHeader(r *http.Request) (*v4AuthInfo, s3err.ErrorCode)
 	// Parse signature
 	signature := strings.TrimPrefix(parts[2], "Signature=")
 
+	hashedPayload := r.Header.Get("X-Amz-Content-Sha256")
+	if hashedPayload == "" {
+		// If header is missing, calculate hash from body (standard for some clients)
+		// We must read and restore the body
+		if r.Body != nil {
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, s3err.ErrInternalError
+			}
+			r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			
+			hash := sha256.Sum256(bodyBytes)
+			hashedPayload = hex.EncodeToString(hash[:])
+		} else {
+			// Empty body
+			hash := sha256.Sum256([]byte(""))
+			hashedPayload = hex.EncodeToString(hash[:])
+		}
+	}
+
 	return &v4AuthInfo{
 		Signature:     signature,
 		AccessKey:     accessKey,
@@ -109,7 +132,7 @@ func extractV4AuthInfoFromHeader(r *http.Request) (*v4AuthInfo, s3err.ErrorCode)
 		Region:        region,
 		Service:       service,
 		Scope:         fmt.Sprintf("%s/%s/%s/aws4_request", scopeDate.Format(yyyymmdd), region, service),
-		HashedPayload: r.Header.Get("X-Amz-Content-Sha256"),
+		HashedPayload: hashedPayload,
 		IsPresigned:   false,
 	}, s3err.ErrNone
 }
