@@ -23,7 +23,7 @@ const (
 	DirectoryEtcRemote    = "/etc/remote"
 	FilerConfName         = "filer.conf"
 	IamConfigDirectory    = "/etc/iam"
-	IamIdentityFile       = "identity.json"
+	IamIdentityFile       = "iam_config.json"
 	IamPoliciesFile       = "policies.json"
 )
 

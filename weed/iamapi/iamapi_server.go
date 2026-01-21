@@ -120,6 +120,15 @@ func NewIamApiServerWithStore(router *mux.Router, option *IamServerOption, expli
 	
 	configure.credentialManager = cm
 	
+	// Run migration from iam_config.json to individual files (if needed)
+	// This runs once at startup to ensure users are in the expected location
+	if store, ok := cm.GetStore().(*filer_etc.FilerEtcStore); ok {
+		if err := store.MigrateUsersToIndividualFiles(context.Background()); err != nil {
+			glog.Warningf("IAM user migration failed: %v", err)
+			// Don't return error - service should still start even if migration fails
+		}
+	}
+	
 	// Initialize standalone IAM Manager
 	iamManager := integration.NewIAMManager()
 	// Configure IAM Manager with proper defaults

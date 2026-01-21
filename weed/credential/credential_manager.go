@@ -48,8 +48,7 @@ func (cm *CredentialManager) GetStore() CredentialStore {
 
 // LoadConfiguration loads the S3 API configuration
 func (cm *CredentialManager) LoadConfiguration(ctx context.Context) (*iam_pb.S3ApiConfiguration, error) {
-	// Not implemented in this POC
-	return nil, nil
+	return cm.store.LoadConfiguration(ctx)
 }
 
 
