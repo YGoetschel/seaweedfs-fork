@@ -594,10 +594,7 @@ func (m *IAMManager) SetSTSAdapter(adapter STSAdapter) {
 
 // evaluateTrustPolicy evaluates a trust policy against the evaluation context
 func (m *IAMManager) evaluateTrustPolicy(trustPolicy *policy.PolicyDocument, evalCtx *policy.EvaluationContext) bool {
-	glog.V(0).Infof("DEBUG: evaluateTrustPolicy ENTRY. Policy Document: %+v", trustPolicy)
-	glog.V(0).Infof("DEBUG: evaluateTrustPolicy ENTRY. Evaluation Context: %+v", evalCtx)
 	if trustPolicy == nil {
-		glog.V(0).Infof("DEBUG: evaluateTrustPolicy FAILURE. Trust policy is nil")
 		return false
 	}
 
@@ -606,8 +603,7 @@ func (m *IAMManager) evaluateTrustPolicy(trustPolicy *policy.PolicyDocument, eva
 	// - They check Action to see what actions are allowed
 	// - They may have Conditions that must be satisfied
 
-	for i, statement := range trustPolicy.Statement {
-		glog.V(0).Infof("DEBUG: Processing Statement [%d]: %+v", i, statement)
+	for _, statement := range trustPolicy.Statement {
 		if statement.Effect == "Allow" {
 			// Check if the action matches
 			actionMatches := false
@@ -624,25 +620,19 @@ func (m *IAMManager) evaluateTrustPolicy(trustPolicy *policy.PolicyDocument, eva
 			// Check if the principal matches
 			principalMatches := false
 			if principal, ok := statement.Principal.(map[string]interface{}); ok {
-				glog.V(0).Infof("DEBUG: Found Principal Map: %+v", principal)
-
 				// Check for AWS principal (IAM users/roles)
 				if !principalMatches {
 					if awsValue, ok := principal["AWS"]; ok {
-						glog.V(0).Infof("Evaluating AWS Principal. Policy: %v, ContextKey: seaweed:AWSPrincipal", awsValue)
 						principalMatches = m.evaluatePrincipalValue(awsValue, evalCtx, "seaweed:AWSPrincipal")
-						glog.V(0).Infof("AWS Principal Match Result: %v", principalMatches)
 					}
 				}
 				// Check for Service principal (AWS services)
 				if !principalMatches {
 					if serviceValue, ok := principal["Service"]; ok {
-						glog.V(0).Infof("DEBUG: Evaluating Service Principal: %v", serviceValue)
 						principalMatches = m.evaluatePrincipalValue(serviceValue, evalCtx, "seaweed:ServicePrincipal")
 					}
 				}
 			} else if principalStr, ok := statement.Principal.(string); ok {
-				glog.V(0).Infof("DEBUG: Found String Principal: %s", principalStr)
 				// Handle string principal
 				if principalStr == "*" {
 					principalMatches = true
@@ -698,7 +688,6 @@ func (m *IAMManager) evaluateTrustPolicyConditions(conditions map[string]map[str
 func (m *IAMManager) evaluatePrincipalValue(principalValue interface{}, evalCtx *policy.EvaluationContext, contextKey string) bool {
 	// Get the value from evaluation context
 	contextValue, exists := evalCtx.RequestContext[contextKey]
-	glog.V(0).Infof("evaluatePrincipalValue: Key=%s, Exists=%v, ContextValue=%v, PrincipalValue=%v", contextKey, exists, contextValue, principalValue)
 
 	if !exists {
 		return false
